@@ -10,11 +10,12 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-"""Accessors to retrieve the script S3 URI to run pretrained ML models."""
+"""Accessors to retrieve hyperparameters for training jobs."""
 
 from __future__ import absolute_import
 
 import logging
+from typing import Dict
 
 from sagemaker.jumpstart import utils as jumpstart_utils
 from sagemaker.jumpstart import artifacts
@@ -22,24 +23,29 @@ from sagemaker.jumpstart import artifacts
 logger = logging.getLogger(__name__)
 
 
-def retrieve(
+def retrieve_default(
     region=None,
     model_id=None,
     model_version=None,
-    script_scope=None,
-) -> str:
-    """Retrieves the script S3 URI associated with the model matching the given arguments.
+    include_container_hyperparameters=False,
+) -> Dict[str, str]:
+    """Retrieves the default training hyperparameters for the model matching the given arguments.
 
     Args:
-        region (str): Region for which to retrieve model script S3 URI.
+        region (str): Region for which to retrieve default hyperparameters.
         model_id (str): JumpStart model ID of the JumpStart model for which to
-            retrieve the script S3 URI.
+            retrieve the default hyperparameters.
         model_version (str): Version of the JumpStart model for which to retrieve the
-            model script S3 URI.
-        script_scope (str): The script type, i.e. what it is used for.
-            Valid values: "training" and "inference".
+            default hyperparameters.
+        include_container_hyperparameters (bool): True if container hyperparameters
+            should be returned as well. Container hyperparameters are not used to tune
+            the specific algorithm, but rather by SageMaker Training to setup
+            the training container environment. For example, there is a container hyperparameter
+            that indicates the entrypoint script to use. These hyperparameters may be required
+            when creating a training job with boto3, however the ``Estimator`` classes
+            should take care of adding container hyperparameters to the job. (Default: False).
     Returns:
-        str: the model script URI for the corresponding model.
+        dict: the hyperparameters to use for the model.
 
     Raises:
         ValueError: If the combination of arguments specified is not supported.
@@ -47,8 +53,6 @@ def retrieve(
     if not jumpstart_utils.is_jumpstart_model_input(model_id, model_version):
         raise ValueError("Must specify `model_id` and `model_version` when retrieving script URIs.")
 
-    # mypy type checking require these assertions
-    assert model_id is not None
-    assert model_version is not None
-
-    return artifacts._retrieve_script_uri(model_id, model_version, script_scope, region)
+    return artifacts._retrieve_default_hyperparameters(
+        model_id, model_version, region, include_container_hyperparameters
+    )
