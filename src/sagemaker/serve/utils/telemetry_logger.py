@@ -13,7 +13,9 @@
 """Placeholder docstring"""
 from __future__ import absolute_import
 import logging
+from dataclasses import dataclass
 from time import perf_counter
+from typing import Optional
 
 import requests
 
@@ -36,6 +38,12 @@ from sagemaker.serve.utils.types import (
     SpeculativeDecodingDraftModelSource,
 )
 from sagemaker.serve.validations.check_image_uri import is_1p_image_uri
+from sagemaker.telemetry.constants import Feature
+from sagemaker.telemetry.telemetry_logging import (
+    _base_extra,
+    _feature_list,
+    _send_telemetry_request,
+)
 from sagemaker.user_agent import SDK_VERSION
 
 logger = logging.getLogger(__name__)
@@ -50,15 +58,14 @@ TELEMETRY_OPT_OUT_MESSAGING = (
     "for more info."
 )
 
-# The old bucket keeps its consumers. sm-pysdk-t is the bucket that the sagemaker.telemetry
-# emitter and the v3 SDK post to, so one query covers every JumpStart event.
-TELEMETRY_BUCKET_PREFIXES = ("dev-exp-t", "sm-pysdk-t")
-
 MODE_TO_CODE = {
     str(Mode.IN_PROCESS): 1,
     str(Mode.LOCAL_CONTAINER): 2,
     str(Mode.SAGEMAKER_ENDPOINT): 3,
 }
+
+# The v3 SDK emits x-jumpstartModelId on model_builder.build and model_builder.deploy only.
+JUMPSTART_SDK_EVENT_FUNC_NAMES = frozenset({"ModelBuilder.build", "ModelBuilder.deploy"})
 
 MODEL_SERVER_TO_CODE = {
     str(ModelServer.TORCHSERVE): 1,
@@ -155,8 +162,6 @@ def _capture_telemetry(func_name: str):
 
             if getattr(self, "model_hub", False):
                 extra += f"&x-modelHub={MODEL_HUB_TO_CODE[str(self.model_hub)]}"
-                if self.model_hub == ModelHub.JUMPSTART and isinstance(self.model, str):
-                    extra += f"&x-jumpstartModelId={self.model}"
 
             if getattr(self, "is_fine_tuned", False):
                 extra += "&x-fineTuned=1"
@@ -178,7 +183,8 @@ def _capture_telemetry(func_name: str):
                 config_name_code = self.deployment_config_name.lower()
                 extra += f"&x-configName={config_name_code}"
 
-            extra += f"&x-latency={round(elapsed, 2)}"
+            latency = round(elapsed, 2)
+            extra += f"&x-latency={latency}"
 
             if hasattr(self, "serve_settings") and not self.serve_settings.telemetry_opt_out:
                 _send_telemetry(
@@ -189,6 +195,8 @@ def _capture_telemetry(func_name: str):
                     failure_type,
                     extra,
                 )
+                outcome = _CallOutcome(status, latency, failure_reason, failure_type)
+                _send_jumpstart_telemetry(self, func_name, outcome)
 
             if caught_ex:
                 raise caught_ex
@@ -200,6 +208,57 @@ def _capture_telemetry(func_name: str):
     return decorator
 
 
+@dataclass
+class _CallOutcome:
+    """The result of one decorated call: the status code, the latency, and the caught error."""
+
+    status: str
+    latency: float
+    failure_reason: Optional[str]
+    failure_type: Optional[str]
+
+
+def _jumpstart_model_id(model_builder) -> str:
+    """Return the JumpStart model ID, or an empty string for another model source."""
+    if getattr(model_builder, "model_hub", None) != ModelHub.JUMPSTART:
+        return ""
+    model = getattr(model_builder, "model", None)
+    if not isinstance(model, str):
+        return ""
+    return model
+
+
+def _send_jumpstart_telemetry(model_builder, func_name: str, outcome: _CallOutcome) -> None:
+    """Send one JUMPSTART_V2 event for a JumpStart build or deploy through the SDK emitter.
+
+    The event has the emitter schema, so it lands in the same bucket and shape as the
+    sagemaker.telemetry events and the v3 SDK events. Another model source or another method
+    sends nothing here.
+    """
+    if func_name not in JUMPSTART_SDK_EVENT_FUNC_NAMES:
+        return
+    model_id = _jumpstart_model_id(model_builder)
+    if not model_id:
+        return
+    try:
+        session = model_builder.sagemaker_session
+        extra = _base_extra(func_name, session)
+        mode = getattr(model_builder, "mode", None)
+        if mode is not None:
+            extra += f"&x-mode={mode}"
+        extra += f"&x-jumpstartModelId={model_id}&x-latency={outcome.latency}"
+        _send_telemetry_request(
+            int(outcome.status),
+            _feature_list(Feature.JUMPSTART_V2, session),
+            session,
+            outcome.failure_reason,
+            outcome.failure_type,
+            extra,
+        )
+    except Exception:  # pylint: disable=W0703
+        logger.debug("JumpStart SDK telemetry not emitted")
+
+
 def _send_telemetry(
     status: str,
     mode: int,
@@ -208,47 +267,48 @@ def _send_telemetry(
     failure_type: str = None,
     extra_info: str = None,
 ) -> None:
-    """Make a GET request to an empty object in each telemetry S3 bucket"""
+    """Make GET request to an empty object in S3 bucket"""
     try:
         accountId = _get_accountId(session)
         region = _get_region_or_default(session)
-        query = _construct_query(
+        url = _construct_url(
             accountId,
             str(mode),
             status,
             failure_reason,
             failure_type,
             extra_info,
+            region,
         )
-        for bucket_prefix in TELEMETRY_BUCKET_PREFIXES:
-            _requests_helper(_construct_url(bucket_prefix, region, query), 2)
+        _requests_helper(url, 2)
         logger.debug("ModelBuilder metrics emitted.")
     except Exception:  # pylint: disable=W0703
         logger.debug("ModelBuilder metrics not emitted")
 
 
-def _construct_query(
+def _construct_url(
     accountId: str,
     mode: str,
     status: str,
     failure_reason: str,
     failure_type: str,
     extra_info: str,
+    region: str,
 ) -> str:
-    """Construct the query string for the telemetry request"""
+    """Placeholder docstring"""
 
-    query = f"x-accountId={accountId}&x-mode={mode}&x-status={status}"
+    base_url = (
+        f"https://dev-exp-t-{region}.s3.{region}.amazonaws.com/telemetry?"
+        f"x-accountId={accountId}"
+        f"&x-mode={mode}"
+        f"&x-status={status}"
+    )
     if failure_reason:
-        query += f"&x-failureReason={failure_reason}"
-        query += f"&x-failureType={failure_type}"
+        base_url += f"&x-failureReason={failure_reason}"
+        base_url += f"&x-failureType={failure_type}"
     if extra_info:
-        query += f"&x-extra={extra_info}"
-    return query
-
-
-def _construct_url(bucket_prefix: str, region: str, query: str) -> str:
-    """Construct the URL for the telemetry request to one bucket"""
-    return f"https://{bucket_prefix}-{region}.s3.{region}.amazonaws.com/telemetry?{query}"
+        base_url += f"&x-extra={extra_info}"
+    return base_url
 
 
 def _requests_helper(url, timeout):

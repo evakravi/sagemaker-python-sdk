@@ -77,6 +77,38 @@ def _jumpstart_model_id_param(feature: str, args: tuple) -> str:
     return f"&x-jumpstartModelId={model_id}"
 
 
+def _feature_list(feature: str, sagemaker_session) -> List[int]:
+    """Return the feature codes of an event: the feature, then SDK defaults and local mode."""
+    feature_list: List[int] = [FEATURE_TO_CODE[str(feature)]]
+    if (
+        hasattr(sagemaker_session, "sagemaker_config")
+        and sagemaker_session.sagemaker_config
+        and feature != Feature.SDK_DEFAULTS_V2
+    ):
+        feature_list.append(FEATURE_TO_CODE[str(Feature.SDK_DEFAULTS_V2)])
+    if (
+        hasattr(sagemaker_session, "local_mode")
+        and sagemaker_session.local_mode
+        and feature != Feature.LOCAL_MODE_V2
+    ):
+        feature_list.append(FEATURE_TO_CODE[str(Feature.LOCAL_MODE_V2)])
+    return feature_list
+
+
+def _base_extra(func_name: str, sagemaker_session) -> str:
+    """Return the platform and environment part of the x-extra string of an event."""
+    extra = (
+        f"{func_name}"
+        f"&x-sdkVersion={SDK_VERSION}"
+        f"&x-env={PYTHON_VERSION}"
+        f"&x-sys={OS_NAME_VERSION}"
+        f"&x-platform={process_studio_metadata_file()}"
+    )
+    if hasattr(sagemaker_session, "endpoint_arn") and sagemaker_session.endpoint_arn:
+        extra += f"&x-endpointArn={sagemaker_session.endpoint_arn}"
+    return extra
+
+
 def _telemetry_emitter(feature: str, func_name: str):
     """Telemetry Emitter
 
@@ -105,7 +137,6 @@ def _telemetry_emitter(feature: str, func_name: str):
                 logger.info(TELEMETRY_OPT_OUT_MESSAGING)
                 response = None
                 caught_ex = None
-                studio_app_type = process_studio_metadata_file()
 
                 # Check if telemetry is opted out
                 telemetry_opt_out_flag = resolve_value_from_config(
@@ -116,36 +147,8 @@ def _telemetry_emitter(feature: str, func_name: str):
                 )
                 logger.debug("TelemetryOptOut flag is set to: %s", telemetry_opt_out_flag)
 
-                # Construct the feature list to track feature combinations
-                feature_list: List[int] = [FEATURE_TO_CODE[str(feature)]]
-
-                if (
-                    hasattr(sagemaker_session, "sagemaker_config")
-                    and sagemaker_session.sagemaker_config
-                    and feature != Feature.SDK_DEFAULTS_V2
-                ):
-                    feature_list.append(FEATURE_TO_CODE[str(Feature.SDK_DEFAULTS_V2)])
-
-                if (
-                    hasattr(sagemaker_session, "local_mode")
-                    and sagemaker_session.local_mode
-                    and feature != Feature.LOCAL_MODE_V2
-                ):
-                    feature_list.append(FEATURE_TO_CODE[str(Feature.LOCAL_MODE_V2)])
-
-                # Construct the extra info to track platform and environment usage metadata
-                extra = (
-                    f"{func_name}"
-                    f"&x-sdkVersion={SDK_VERSION}"
-                    f"&x-env={PYTHON_VERSION}"
-                    f"&x-sys={OS_NAME_VERSION}"
-                    f"&x-platform={studio_app_type}"
-                )
-
-                # Add endpoint ARN to the extra info if available
-                if hasattr(sagemaker_session, "endpoint_arn") and sagemaker_session.endpoint_arn:
-                    extra += f"&x-endpointArn={sagemaker_session.endpoint_arn}"
-
+                feature_list = _feature_list(feature, sagemaker_session)
+                extra = _base_extra(func_name, sagemaker_session)
                 extra += _jumpstart_model_id_param(feature, args)
 
                 start_timer = perf_counter()

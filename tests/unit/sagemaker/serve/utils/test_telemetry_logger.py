@@ -12,23 +12,23 @@
 # language governing permissions and limitations under the License.
 from __future__ import absolute_import
 import unittest
-from unittest.mock import Mock, call, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock
 from sagemaker.serve import Mode, ModelServer
 from sagemaker.serve.model_format.mlflow.constants import MLFLOW_MODEL_PATH, MLFLOW_TRACKING_ARN
 from sagemaker.serve.utils.telemetry_logger import (
-    TELEMETRY_BUCKET_PREFIXES,
     _send_telemetry,
     _capture_telemetry,
-    _construct_query,
     _construct_url,
 )
 from sagemaker.serve.utils.exceptions import ModelBuilderException, LocalModelOutOfMemoryException
 from sagemaker.serve.utils.types import ImageUriOption, ModelHub
+from sagemaker.telemetry.telemetry_logging import OS_NAME_VERSION, PYTHON_VERSION
 from sagemaker.user_agent import SDK_VERSION
 
 MOCK_SESSION = Mock()
 MOCK_DEPLOY_FUNC_NAME = "Mock.deploy"
 MOCK_OPTIMIZE_FUNC_NAME = "Mock.optimize"
+MODEL_BUILDER_DEPLOY_FUNC_NAME = "ModelBuilder.deploy"
 MOCK_DJL_CONTAINER = (
     "763104351884.dkr.ecr.us-west-2.amazonaws.com/" "djl-inference:0.25.0-deepspeed0.11.0-cu118"
 )
@@ -41,6 +41,7 @@ MOCK_PYTORCH_CONTAINER = (
 )
 MOCK_HUGGINGFACE_ID = "meta-llama/Llama-2-7b-hf"
 MOCK_JUMPSTART_ID = "huggingface-llm-falcon-7b-bf16"
+MOCK_STUDIO_APP_TYPE = "KernelGateway"
 MOCK_EXCEPTION = LocalModelOutOfMemoryException("mock raise ex")
 MOCK_ENDPOINT_ARN = "arn:aws:sagemaker:us-west-2:123456789012:endpoint/test"
 MOCK_MODEL_METADATA_FOR_MLFLOW = {
@@ -63,29 +64,51 @@ class ModelBuilderMock:
     def mock_optimize(self, *args, **kwargs):
         pass
 
+    @_capture_telemetry(MODEL_BUILDER_DEPLOY_FUNC_NAME)
+    def deploy(self, mock_exception_func=None):
+        if mock_exception_func:
+            mock_exception_func()
+
 
 class TestTelemetryLogger(unittest.TestCase):
+    def setUp(self):
+        MOCK_SESSION.sagemaker_config = None
+        MOCK_SESSION.local_mode = False
+
+    def _jumpstart_model_builder(self):
+        mock_model_builder = ModelBuilderMock()
+        mock_model_builder.serve_settings.telemetry_opt_out = False
+        mock_model_builder.image_uri = None
+        mock_model_builder.model = MOCK_JUMPSTART_ID
+        mock_model_builder.model_hub = ModelHub.JUMPSTART
+        mock_model_builder.mode = Mode.SAGEMAKER_ENDPOINT
+        mock_model_builder.model_server = ModelServer.MMS
+        mock_model_builder.sagemaker_session.endpoint_arn = None
+        return mock_model_builder
+
+    def _jumpstart_extra(self, latency):
+        return (
+            f"{MODEL_BUILDER_DEPLOY_FUNC_NAME}"
+            f"&x-sdkVersion={SDK_VERSION}"
+            f"&x-env={PYTHON_VERSION}"
+            f"&x-sys={OS_NAME_VERSION}"
+            f"&x-platform={MOCK_STUDIO_APP_TYPE}"
+            f"&x-mode={Mode.SAGEMAKER_ENDPOINT}"
+            f"&x-jumpstartModelId={MOCK_JUMPSTART_ID}"
+            f"&x-latency={latency}"
+        )
+
     @patch("sagemaker.serve.utils.telemetry_logger._requests_helper")
     @patch("sagemaker.serve.utils.telemetry_logger._get_accountId")
     def test_log_sucessfully(self, mocked_get_accountId, mocked_request_helper):
         MOCK_SESSION.boto_session.region_name = "ap-south-1"
         mocked_get_accountId.return_value = "testAccountId"
         _send_telemetry("someStatus", 1, MOCK_SESSION)
-        mocked_request_helper.assert_has_calls(
-            [
-                call(
-                    "https://dev-exp-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
-                    "telemetry?x-accountId=testAccountId&x-mode=1&x-status=someStatus",
-                    2,
-                ),
-                call(
-                    "https://sm-pysdk-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
-                    "telemetry?x-accountId=testAccountId&x-mode=1&x-status=someStatus",
-                    2,
-                ),
-            ]
+        mocked_request_helper.assert_called_with(
+            "https://dev-exp-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
+            "telemetry?x-accountId=testAccountId&x-mode=1&x-status=someStatus",
+            2,
         )
-        self.assertEqual(mocked_request_helper.call_count, 2)
 
     @patch("sagemaker.serve.utils.telemetry_logger._get_accountId")
     def test_log_handle_exception(self, mocked_get_accountId):
@@ -184,65 +207,6 @@ class TestTelemetryLogger(unittest.TestCase):
         )
 
     @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
-    def test_capture_telemetry_decorator_jumpstart_emits_model_id(self, mock_send_telemetry):
-        mock_model_builder = ModelBuilderMock()
-        mock_model_builder.serve_settings.telemetry_opt_out = False
-        mock_model_builder.image_uri = MOCK_TGI_CONTAINER
-        mock_model_builder._is_custom_image_uri = False
-        mock_model_builder.model = MOCK_JUMPSTART_ID
-        mock_model_builder.model_hub = ModelHub.JUMPSTART
-        mock_model_builder.mode = Mode.SAGEMAKER_ENDPOINT
-        mock_model_builder.model_server = ModelServer.MMS
-        mock_model_builder.sagemaker_session.endpoint_arn = MOCK_ENDPOINT_ARN
-
-        mock_model_builder.mock_deploy()
-
-        args = mock_send_telemetry.call_args.args
-        latency = str(args[5]).split("latency=")[1]
-        expected_extra_str = (
-            f"{MOCK_DEPLOY_FUNC_NAME}"
-            "&x-modelServer=2"
-            "&x-imageTag=huggingface-pytorch-inference:2.0.0-transformers4.28.1-cpu-py310-ubuntu20.04"
-            f"&x-sdkVersion={SDK_VERSION}"
-            f"&x-defaultImageUsage={ImageUriOption.DEFAULT_IMAGE.value}"
-            f"&x-endpointArn={MOCK_ENDPOINT_ARN}"
-            "&x-modelHub=1"
-            f"&x-jumpstartModelId={MOCK_JUMPSTART_ID}"
-            f"&x-latency={latency}"
-        )
-
-        mock_send_telemetry.assert_called_once_with(
-            "1", 3, MOCK_SESSION, None, None, expected_extra_str
-        )
-
-    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
-    def test_capture_telemetry_decorator_huggingface_hub_omits_model_id(self, mock_send_telemetry):
-        mock_model_builder = ModelBuilderMock()
-        mock_model_builder.serve_settings.telemetry_opt_out = False
-        mock_model_builder.image_uri = None
-        mock_model_builder.model = MOCK_HUGGINGFACE_ID
-        mock_model_builder.model_hub = ModelHub.HUGGINGFACE
-        mock_model_builder.mode = Mode.SAGEMAKER_ENDPOINT
-        mock_model_builder.model_server = ModelServer.MMS
-        mock_model_builder.sagemaker_session.endpoint_arn = None
-
-        mock_model_builder.mock_deploy()
-
-        args = mock_send_telemetry.call_args.args
-        latency = str(args[5]).split("latency=")[1]
-        expected_extra_str = (
-            f"{MOCK_DEPLOY_FUNC_NAME}"
-            "&x-modelServer=2"
-            f"&x-sdkVersion={SDK_VERSION}"
-            "&x-modelHub=2"
-            f"&x-latency={latency}"
-        )
-
-        mock_send_telemetry.assert_called_once_with(
-            "1", 3, MOCK_SESSION, None, None, expected_extra_str
-        )
-
-    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
     def test_capture_telemetry_decorator_no_call_when_disabled(self, mock_send_telemetry):
         mock_model_builder = ModelBuilderMock()
         mock_model_builder.serve_settings.telemetry_opt_out = True
@@ -254,6 +218,103 @@ class TestTelemetryLogger(unittest.TestCase):
         mock_model_builder.mock_deploy()
 
         assert not mock_send_telemetry.called
+
+    @patch("sagemaker.telemetry.telemetry_logging.process_studio_metadata_file")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry_request")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_jumpstart_emits_sdk_event(
+        self, mock_send_telemetry, mock_send_telemetry_request, mock_studio_metadata
+    ):
+        mock_studio_metadata.return_value = MOCK_STUDIO_APP_TYPE
+        mock_model_builder = self._jumpstart_model_builder()
+
+        mock_model_builder.deploy()
+
+        serve_extra = mock_send_telemetry.call_args.args[5]
+        latency = serve_extra.split("latency=")[1]
+        mock_send_telemetry.assert_called_once_with(
+            "1",
+            3,
+            MOCK_SESSION,
+            None,
+            None,
+            f"{MODEL_BUILDER_DEPLOY_FUNC_NAME}&x-modelServer=2&x-sdkVersion={SDK_VERSION}"
+            f"&x-modelHub=1&x-latency={latency}",
+        )
+        mock_send_telemetry_request.assert_called_once_with(
+            1,
+            [8],
+            MOCK_SESSION,
+            None,
+            None,
+            self._jumpstart_extra(latency),
+        )
+
+    @patch("sagemaker.telemetry.telemetry_logging.process_studio_metadata_file")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry_request")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_jumpstart_sdk_event_on_failure(
+        self, mock_send_telemetry, mock_send_telemetry_request, mock_studio_metadata
+    ):
+        mock_studio_metadata.return_value = MOCK_STUDIO_APP_TYPE
+        mock_model_builder = self._jumpstart_model_builder()
+        mock_model_builder.sagemaker_session.local_mode = True
+        mock_exception = Mock()
+        mock_exception.side_effect = MOCK_EXCEPTION
+
+        with self.assertRaises(ModelBuilderException):
+            mock_model_builder.deploy(mock_exception)
+
+        latency = mock_send_telemetry.call_args.args[5].split("latency=")[1]
+        mock_send_telemetry_request.assert_called_once_with(
+            0,
+            [8, 2],
+            MOCK_SESSION,
+            str(MOCK_EXCEPTION),
+            MOCK_EXCEPTION.__class__.__name__,
+            self._jumpstart_extra(latency),
+        )
+
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry_request")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_jumpstart_other_method_sends_no_sdk_event(
+        self, mock_send_telemetry, mock_send_telemetry_request
+    ):
+        mock_model_builder = self._jumpstart_model_builder()
+
+        mock_model_builder.mock_optimize()
+
+        assert "&x-modelHub=1" in mock_send_telemetry.call_args.args[5]
+        assert not mock_send_telemetry_request.called
+
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry_request")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_huggingface_hub_sends_no_sdk_event(
+        self, mock_send_telemetry, mock_send_telemetry_request
+    ):
+        mock_model_builder = self._jumpstart_model_builder()
+        mock_model_builder.model = MOCK_HUGGINGFACE_ID
+        mock_model_builder.model_hub = ModelHub.HUGGINGFACE
+
+        mock_model_builder.deploy()
+
+        serve_extra = mock_send_telemetry.call_args.args[5]
+        assert "&x-modelHub=2" in serve_extra
+        assert "jumpstartModelId" not in serve_extra
+        assert not mock_send_telemetry_request.called
+
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry_request")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_jumpstart_opt_out_sends_no_sdk_event(
+        self, mock_send_telemetry, mock_send_telemetry_request
+    ):
+        mock_model_builder = self._jumpstart_model_builder()
+        mock_model_builder.serve_settings.telemetry_opt_out = True
+
+        mock_model_builder.deploy()
+
+        assert not mock_send_telemetry.called
+        assert not mock_send_telemetry_request.called
 
     @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
     def test_capture_telemetry_decorator_handle_exception_success(self, mock_send_telemetry):
@@ -304,16 +365,18 @@ class TestTelemetryLogger(unittest.TestCase):
         mock_extra_info = "mock_extra_info"
         mock_region = "us-west-2"
 
-        query = _construct_query(
+        ret_url = _construct_url(
             accountId=mock_accountId,
             mode=mock_mode,
             status=mock_status,
             failure_reason=mock_failure_reason,
             failure_type=mock_failure_type,
             extra_info=mock_extra_info,
+            region=mock_region,
         )
 
-        expected_query = (
+        expected_base_url = (
+            f"https://dev-exp-t-{mock_region}.s3.{mock_region}.amazonaws.com/telemetry?"
             f"x-accountId={mock_accountId}"
             f"&x-mode={mock_mode}"
             f"&x-status={mock_status}"
@@ -321,16 +384,7 @@ class TestTelemetryLogger(unittest.TestCase):
             f"&x-failureType={mock_failure_type}"
             f"&x-extra={mock_extra_info}"
         )
-        self.assertEqual(query, expected_query)
-        self.assertEqual(TELEMETRY_BUCKET_PREFIXES, ("dev-exp-t", "sm-pysdk-t"))
-        self.assertEqual(
-            _construct_url("dev-exp-t", mock_region, query),
-            f"https://dev-exp-t-us-west-2.s3.us-west-2.amazonaws.com/telemetry?{expected_query}",
-        )
-        self.assertEqual(
-            _construct_url("sm-pysdk-t", mock_region, query),
-            f"https://sm-pysdk-t-us-west-2.s3.us-west-2.amazonaws.com/telemetry?{expected_query}",
-        )
+        self.assertEqual(ret_url, expected_base_url)
 
     @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
     def test_capture_telemetry_decorator_mlflow_success(self, mock_send_telemetry):
