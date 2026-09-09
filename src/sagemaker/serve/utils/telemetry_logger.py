@@ -50,6 +50,10 @@ TELEMETRY_OPT_OUT_MESSAGING = (
     "for more info."
 )
 
+# The old bucket keeps its consumers. sm-pysdk-t is the bucket that the sagemaker.telemetry
+# emitter and the v3 SDK post to, so one query covers every JumpStart event.
+TELEMETRY_BUCKET_PREFIXES = ("dev-exp-t", "sm-pysdk-t")
+
 MODE_TO_CODE = {
     str(Mode.IN_PROCESS): 1,
     str(Mode.LOCAL_CONTAINER): 2,
@@ -204,48 +208,47 @@ def _send_telemetry(
     failure_type: str = None,
     extra_info: str = None,
 ) -> None:
-    """Make GET request to an empty object in S3 bucket"""
+    """Make a GET request to an empty object in each telemetry S3 bucket"""
     try:
         accountId = _get_accountId(session)
         region = _get_region_or_default(session)
-        url = _construct_url(
+        query = _construct_query(
             accountId,
             str(mode),
             status,
             failure_reason,
             failure_type,
             extra_info,
-            region,
         )
-        _requests_helper(url, 2)
+        for bucket_prefix in TELEMETRY_BUCKET_PREFIXES:
+            _requests_helper(_construct_url(bucket_prefix, region, query), 2)
         logger.debug("ModelBuilder metrics emitted.")
     except Exception:  # pylint: disable=W0703
         logger.debug("ModelBuilder metrics not emitted")
 
 
-def _construct_url(
+def _construct_query(
     accountId: str,
     mode: str,
     status: str,
     failure_reason: str,
     failure_type: str,
     extra_info: str,
-    region: str,
 ) -> str:
-    """Construct the URL for the telemetry request"""
+    """Construct the query string for the telemetry request"""
 
-    base_url = (
-        f"https://sm-pysdk-t-{region}.s3.{region}.amazonaws.com/telemetry?"
-        f"x-accountId={accountId}"
-        f"&x-mode={mode}"
-        f"&x-status={status}"
-    )
+    query = f"x-accountId={accountId}&x-mode={mode}&x-status={status}"
     if failure_reason:
-        base_url += f"&x-failureReason={failure_reason}"
-        base_url += f"&x-failureType={failure_type}"
+        query += f"&x-failureReason={failure_reason}"
+        query += f"&x-failureType={failure_type}"
     if extra_info:
-        base_url += f"&x-extra={extra_info}"
-    return base_url
+        query += f"&x-extra={extra_info}"
+    return query
+
+
+def _construct_url(bucket_prefix: str, region: str, query: str) -> str:
+    """Construct the URL for the telemetry request to one bucket"""
+    return f"https://{bucket_prefix}-{region}.s3.{region}.amazonaws.com/telemetry?{query}"
 
 
 def _requests_helper(url, timeout):

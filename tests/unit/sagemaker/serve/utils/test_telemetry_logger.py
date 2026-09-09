@@ -12,12 +12,14 @@
 # language governing permissions and limitations under the License.
 from __future__ import absolute_import
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, call, patch, MagicMock
 from sagemaker.serve import Mode, ModelServer
 from sagemaker.serve.model_format.mlflow.constants import MLFLOW_MODEL_PATH, MLFLOW_TRACKING_ARN
 from sagemaker.serve.utils.telemetry_logger import (
+    TELEMETRY_BUCKET_PREFIXES,
     _send_telemetry,
     _capture_telemetry,
+    _construct_query,
     _construct_url,
 )
 from sagemaker.serve.utils.exceptions import ModelBuilderException, LocalModelOutOfMemoryException
@@ -69,11 +71,21 @@ class TestTelemetryLogger(unittest.TestCase):
         MOCK_SESSION.boto_session.region_name = "ap-south-1"
         mocked_get_accountId.return_value = "testAccountId"
         _send_telemetry("someStatus", 1, MOCK_SESSION)
-        mocked_request_helper.assert_called_with(
-            "https://sm-pysdk-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
-            "telemetry?x-accountId=testAccountId&x-mode=1&x-status=someStatus",
-            2,
+        mocked_request_helper.assert_has_calls(
+            [
+                call(
+                    "https://dev-exp-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
+                    "telemetry?x-accountId=testAccountId&x-mode=1&x-status=someStatus",
+                    2,
+                ),
+                call(
+                    "https://sm-pysdk-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
+                    "telemetry?x-accountId=testAccountId&x-mode=1&x-status=someStatus",
+                    2,
+                ),
+            ]
         )
+        self.assertEqual(mocked_request_helper.call_count, 2)
 
     @patch("sagemaker.serve.utils.telemetry_logger._get_accountId")
     def test_log_handle_exception(self, mocked_get_accountId):
@@ -292,18 +304,16 @@ class TestTelemetryLogger(unittest.TestCase):
         mock_extra_info = "mock_extra_info"
         mock_region = "us-west-2"
 
-        ret_url = _construct_url(
+        query = _construct_query(
             accountId=mock_accountId,
             mode=mock_mode,
             status=mock_status,
             failure_reason=mock_failure_reason,
             failure_type=mock_failure_type,
             extra_info=mock_extra_info,
-            region=mock_region,
         )
 
-        expected_base_url = (
-            f"https://sm-pysdk-t-{mock_region}.s3.{mock_region}.amazonaws.com/telemetry?"
+        expected_query = (
             f"x-accountId={mock_accountId}"
             f"&x-mode={mock_mode}"
             f"&x-status={mock_status}"
@@ -311,7 +321,16 @@ class TestTelemetryLogger(unittest.TestCase):
             f"&x-failureType={mock_failure_type}"
             f"&x-extra={mock_extra_info}"
         )
-        self.assertEqual(ret_url, expected_base_url)
+        self.assertEqual(query, expected_query)
+        self.assertEqual(TELEMETRY_BUCKET_PREFIXES, ("dev-exp-t", "sm-pysdk-t"))
+        self.assertEqual(
+            _construct_url("dev-exp-t", mock_region, query),
+            f"https://dev-exp-t-us-west-2.s3.us-west-2.amazonaws.com/telemetry?{expected_query}",
+        )
+        self.assertEqual(
+            _construct_url("sm-pysdk-t", mock_region, query),
+            f"https://sm-pysdk-t-us-west-2.s3.us-west-2.amazonaws.com/telemetry?{expected_query}",
+        )
 
     @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
     def test_capture_telemetry_decorator_mlflow_success(self, mock_send_telemetry):
