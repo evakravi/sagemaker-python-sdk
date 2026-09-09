@@ -67,6 +67,16 @@ STATUS_TO_CODE = {
 }
 
 
+def _jumpstart_model_id_param(feature: str, args: tuple) -> str:
+    """Return the JumpStart model ID query param, or an empty string for another feature."""
+    if feature != Feature.JUMPSTART_V2 or len(args) == 0:
+        return ""
+    model_id = getattr(args[0], "model_id", None)
+    if not model_id:
+        return ""
+    return f"&x-jumpstartModelId={model_id}"
+
+
 def _telemetry_emitter(feature: str, func_name: str):
     """Telemetry Emitter
 
@@ -135,6 +145,8 @@ def _telemetry_emitter(feature: str, func_name: str):
                 # Add endpoint ARN to the extra info if available
                 if hasattr(sagemaker_session, "endpoint_arn") and sagemaker_session.endpoint_arn:
                     extra += f"&x-endpointArn={sagemaker_session.endpoint_arn}"
+
+                extra += _jumpstart_model_id_param(feature, args)
 
                 start_timer = perf_counter()
                 try:

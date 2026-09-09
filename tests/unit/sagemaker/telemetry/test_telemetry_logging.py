@@ -37,6 +37,8 @@ MOCK_EXCEPTION = LocalModelOutOfMemoryException("mock raise ex")
 MOCK_FEATURE = Feature.SDK_DEFAULTS_V2
 MOCK_FUNC_NAME = "Mock.local_session.create_model"
 MOCK_ENDPOINT_ARN = "arn:aws:sagemaker:us-west-2:123456789012:endpoint/test"
+MOCK_JUMPSTART_FUNC_NAME = "Mock.jumpstart_model.deploy"
+MOCK_JUMPSTART_MODEL_ID = "huggingface-llm-falcon-7b-bf16"
 
 
 class LocalSagemakerClientMock:
@@ -47,6 +49,20 @@ class LocalSagemakerClientMock:
     def mock_create_model(self, mock_exception_func=None):
         if mock_exception_func:
             mock_exception_func()
+
+
+class JumpStartModelMock:
+    def __init__(self, model_id):
+        self.sagemaker_session = MOCK_SESSION
+        self.model_id = model_id
+
+    @_telemetry_emitter(Feature.JUMPSTART_V2, MOCK_JUMPSTART_FUNC_NAME)
+    def mock_deploy(self):
+        pass
+
+    @_telemetry_emitter(MOCK_FEATURE, MOCK_FUNC_NAME)
+    def mock_create_model(self):
+        pass
 
 
 class TestTelemetryLogging(unittest.TestCase):
@@ -185,6 +201,62 @@ class TestTelemetryLogging(unittest.TestCase):
             mock_exception_obj.__class__.__name__,
             expected_extra_str,
         )
+
+    @patch("sagemaker.telemetry.telemetry_logging._send_telemetry_request")
+    @patch("sagemaker.telemetry.telemetry_logging.resolve_value_from_config")
+    def test_telemetry_emitter_jumpstart_feature_emits_model_id(
+        self, mock_resolve_config, mock_send_telemetry_request
+    ):
+        """A JUMPSTART_V2 event carries the JumpStart model ID"""
+        mock_resolve_config.return_value = False
+        mock_jumpstart_model = JumpStartModelMock(MOCK_JUMPSTART_MODEL_ID)
+        mock_jumpstart_model.sagemaker_session.endpoint_arn = None
+        mock_jumpstart_model.mock_deploy()
+        app_type = process_studio_metadata_file()
+
+        args = mock_send_telemetry_request.call_args.args
+        latency = str(args[5]).split("latency=")[1]
+        expected_extra_str = (
+            f"{MOCK_JUMPSTART_FUNC_NAME}"
+            f"&x-sdkVersion={SDK_VERSION}"
+            f"&x-env={PYTHON_VERSION}"
+            f"&x-sys={OS_NAME_VERSION}"
+            f"&x-platform={app_type}"
+            f"&x-jumpstartModelId={MOCK_JUMPSTART_MODEL_ID}"
+            f"&x-latency={latency}"
+        )
+
+        mock_send_telemetry_request.assert_called_once_with(
+            1, [8, 1, 2], MOCK_SESSION, None, None, expected_extra_str
+        )
+
+    @patch("sagemaker.telemetry.telemetry_logging._send_telemetry_request")
+    @patch("sagemaker.telemetry.telemetry_logging.resolve_value_from_config")
+    def test_telemetry_emitter_other_feature_omits_model_id(
+        self, mock_resolve_config, mock_send_telemetry_request
+    ):
+        """An event for another feature omits the model ID that the instance has"""
+        mock_resolve_config.return_value = False
+        mock_jumpstart_model = JumpStartModelMock(MOCK_JUMPSTART_MODEL_ID)
+        mock_jumpstart_model.sagemaker_session.endpoint_arn = None
+        mock_jumpstart_model.mock_create_model()
+
+        extra_str = mock_send_telemetry_request.call_args.args[5]
+        assert "x-jumpstartModelId" not in extra_str
+
+    @patch("sagemaker.telemetry.telemetry_logging._send_telemetry_request")
+    @patch("sagemaker.telemetry.telemetry_logging.resolve_value_from_config")
+    def test_telemetry_emitter_jumpstart_feature_without_model_id(
+        self, mock_resolve_config, mock_send_telemetry_request
+    ):
+        """A JUMPSTART_V2 event with no model ID has no model ID param"""
+        mock_resolve_config.return_value = False
+        mock_jumpstart_model = JumpStartModelMock(None)
+        mock_jumpstart_model.sagemaker_session.endpoint_arn = None
+        mock_jumpstart_model.mock_deploy()
+
+        extra_str = mock_send_telemetry_request.call_args.args[5]
+        assert "x-jumpstartModelId" not in extra_str
 
     def test_construct_url_with_failure_reason_and_extra_info(self):
         """Test to verify the _construct_url function with failure reason and extra info"""

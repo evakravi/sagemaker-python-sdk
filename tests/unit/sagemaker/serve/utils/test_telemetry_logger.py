@@ -21,7 +21,7 @@ from sagemaker.serve.utils.telemetry_logger import (
     _construct_url,
 )
 from sagemaker.serve.utils.exceptions import ModelBuilderException, LocalModelOutOfMemoryException
-from sagemaker.serve.utils.types import ImageUriOption
+from sagemaker.serve.utils.types import ImageUriOption, ModelHub
 from sagemaker.user_agent import SDK_VERSION
 
 MOCK_SESSION = Mock()
@@ -38,6 +38,7 @@ MOCK_PYTORCH_CONTAINER = (
     "763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-inference:2.0.1-cpu-py310"
 )
 MOCK_HUGGINGFACE_ID = "meta-llama/Llama-2-7b-hf"
+MOCK_JUMPSTART_ID = "huggingface-llm-falcon-7b-bf16"
 MOCK_EXCEPTION = LocalModelOutOfMemoryException("mock raise ex")
 MOCK_ENDPOINT_ARN = "arn:aws:sagemaker:us-west-2:123456789012:endpoint/test"
 MOCK_MODEL_METADATA_FOR_MLFLOW = {
@@ -69,7 +70,7 @@ class TestTelemetryLogger(unittest.TestCase):
         mocked_get_accountId.return_value = "testAccountId"
         _send_telemetry("someStatus", 1, MOCK_SESSION)
         mocked_request_helper.assert_called_with(
-            "https://dev-exp-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
+            "https://sm-pysdk-t-ap-south-1.s3.ap-south-1.amazonaws.com/"
             "telemetry?x-accountId=testAccountId&x-mode=1&x-status=someStatus",
             2,
         )
@@ -171,6 +172,65 @@ class TestTelemetryLogger(unittest.TestCase):
         )
 
     @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_jumpstart_emits_model_id(self, mock_send_telemetry):
+        mock_model_builder = ModelBuilderMock()
+        mock_model_builder.serve_settings.telemetry_opt_out = False
+        mock_model_builder.image_uri = MOCK_TGI_CONTAINER
+        mock_model_builder._is_custom_image_uri = False
+        mock_model_builder.model = MOCK_JUMPSTART_ID
+        mock_model_builder.model_hub = ModelHub.JUMPSTART
+        mock_model_builder.mode = Mode.SAGEMAKER_ENDPOINT
+        mock_model_builder.model_server = ModelServer.MMS
+        mock_model_builder.sagemaker_session.endpoint_arn = MOCK_ENDPOINT_ARN
+
+        mock_model_builder.mock_deploy()
+
+        args = mock_send_telemetry.call_args.args
+        latency = str(args[5]).split("latency=")[1]
+        expected_extra_str = (
+            f"{MOCK_DEPLOY_FUNC_NAME}"
+            "&x-modelServer=2"
+            "&x-imageTag=huggingface-pytorch-inference:2.0.0-transformers4.28.1-cpu-py310-ubuntu20.04"
+            f"&x-sdkVersion={SDK_VERSION}"
+            f"&x-defaultImageUsage={ImageUriOption.DEFAULT_IMAGE.value}"
+            f"&x-endpointArn={MOCK_ENDPOINT_ARN}"
+            "&x-modelHub=1"
+            f"&x-jumpstartModelId={MOCK_JUMPSTART_ID}"
+            f"&x-latency={latency}"
+        )
+
+        mock_send_telemetry.assert_called_once_with(
+            "1", 3, MOCK_SESSION, None, None, expected_extra_str
+        )
+
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_huggingface_hub_omits_model_id(self, mock_send_telemetry):
+        mock_model_builder = ModelBuilderMock()
+        mock_model_builder.serve_settings.telemetry_opt_out = False
+        mock_model_builder.image_uri = None
+        mock_model_builder.model = MOCK_HUGGINGFACE_ID
+        mock_model_builder.model_hub = ModelHub.HUGGINGFACE
+        mock_model_builder.mode = Mode.SAGEMAKER_ENDPOINT
+        mock_model_builder.model_server = ModelServer.MMS
+        mock_model_builder.sagemaker_session.endpoint_arn = None
+
+        mock_model_builder.mock_deploy()
+
+        args = mock_send_telemetry.call_args.args
+        latency = str(args[5]).split("latency=")[1]
+        expected_extra_str = (
+            f"{MOCK_DEPLOY_FUNC_NAME}"
+            "&x-modelServer=2"
+            f"&x-sdkVersion={SDK_VERSION}"
+            "&x-modelHub=2"
+            f"&x-latency={latency}"
+        )
+
+        mock_send_telemetry.assert_called_once_with(
+            "1", 3, MOCK_SESSION, None, None, expected_extra_str
+        )
+
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
     def test_capture_telemetry_decorator_no_call_when_disabled(self, mock_send_telemetry):
         mock_model_builder = ModelBuilderMock()
         mock_model_builder.serve_settings.telemetry_opt_out = True
@@ -243,7 +303,7 @@ class TestTelemetryLogger(unittest.TestCase):
         )
 
         expected_base_url = (
-            f"https://dev-exp-t-{mock_region}.s3.{mock_region}.amazonaws.com/telemetry?"
+            f"https://sm-pysdk-t-{mock_region}.s3.{mock_region}.amazonaws.com/telemetry?"
             f"x-accountId={mock_accountId}"
             f"&x-mode={mock_mode}"
             f"&x-status={mock_status}"

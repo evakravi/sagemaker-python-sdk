@@ -151,6 +151,8 @@ def _capture_telemetry(func_name: str):
 
             if getattr(self, "model_hub", False):
                 extra += f"&x-modelHub={MODEL_HUB_TO_CODE[str(self.model_hub)]}"
+                if self.model_hub == ModelHub.JUMPSTART and isinstance(self.model, str):
+                    extra += f"&x-jumpstartModelId={self.model}"
 
             if getattr(self, "is_fine_tuned", False):
                 extra += "&x-fineTuned=1"
@@ -230,10 +232,10 @@ def _construct_url(
     extra_info: str,
     region: str,
 ) -> str:
-    """Placeholder docstring"""
+    """Construct the URL for the telemetry request"""
 
     base_url = (
-        f"https://dev-exp-t-{region}.s3.{region}.amazonaws.com/telemetry?"
+        f"https://sm-pysdk-t-{region}.s3.{region}.amazonaws.com/telemetry?"
         f"x-accountId={accountId}"
         f"&x-mode={mode}"
         f"&x-status={status}"
