@@ -266,6 +266,15 @@ class TestTelemetryLogger(unittest.TestCase):
             mock_model_builder.deploy(mock_exception)
 
         latency = mock_send_telemetry.call_args.args[5].split("latency=")[1]
+        mock_send_telemetry.assert_called_once_with(
+            "0",
+            3,
+            MOCK_SESSION,
+            str(MOCK_EXCEPTION),
+            MOCK_EXCEPTION.__class__.__name__,
+            f"{MODEL_BUILDER_DEPLOY_FUNC_NAME}&x-modelServer=2&x-sdkVersion={SDK_VERSION}"
+            f"&x-modelHub=1&x-latency={latency}",
+        )
         mock_send_telemetry_request.assert_called_once_with(
             0,
             [8, 2],
@@ -274,6 +283,19 @@ class TestTelemetryLogger(unittest.TestCase):
             MOCK_EXCEPTION.__class__.__name__,
             self._jumpstart_extra(latency),
         )
+
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry_request")
+    @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")
+    def test_capture_telemetry_decorator_jumpstart_sdk_event_failure_keeps_legacy_event(
+        self, mock_send_telemetry, mock_send_telemetry_request
+    ):
+        mock_send_telemetry_request.side_effect = RuntimeError("sdk emitter down")
+        mock_model_builder = self._jumpstart_model_builder()
+
+        mock_model_builder.deploy()
+
+        assert mock_send_telemetry.call_count == 1
+        assert "&x-modelHub=1" in mock_send_telemetry.call_args.args[5]
 
     @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry_request")
     @patch("sagemaker.serve.utils.telemetry_logger._send_telemetry")

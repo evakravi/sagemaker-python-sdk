@@ -233,7 +233,8 @@ def _send_jumpstart_telemetry(model_builder, func_name: str, outcome: _CallOutco
 
     The event has the emitter schema, so it lands in the same bucket and shape as the
     sagemaker.telemetry events and the v3 SDK events. Another model source or another method
-    sends nothing here.
+    sends nothing here. The event is additive: the ModelBuilder event to the old bucket is
+    sent first and stays as it was, and a failure here never gets to the caller.
     """
     if func_name not in JUMPSTART_SDK_EVENT_FUNC_NAMES:
         return
